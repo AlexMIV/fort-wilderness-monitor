@@ -308,7 +308,7 @@ def check_target_rooms(data):
         #
         # If reasonUnavailable is absent, the room contains
         # pricing/offer information and is considered available.
-        if room_id == "412224545":
+if room_id == "412224545":
     is_available = True
 else:
     is_available = not reason
