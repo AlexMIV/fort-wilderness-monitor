@@ -141,26 +141,28 @@ def disney_session():
 def get_disney_availability():
     session = disney_session()
 
-    # First visit Disney normally so Disney can establish
-    # fresh anonymous session cookies.
     print("Opening Fort Wilderness page to establish Disney session...")
 
-try:
-    page = session.get(
-        BOOKING_PAGE,
-        timeout=30,
-    )
-    print(f"Disney page warm-up returned HTTP {page.status_code}. Continuing...")
-except requests.RequestException as exc:
-    print(f"Disney page warm-up failed: {exc}. Continuing anyway...")
+    try:
+        page = session.get(
+            BOOKING_PAGE,
+            timeout=30,
+        )
+        print(
+            f"Disney page warm-up returned HTTP "
+            f"{page.status_code}. Continuing..."
+        )
+    except requests.RequestException as exc:
+        print(
+            f"Disney page warm-up failed: "
+            f"{exc}. Continuing anyway..."
+        )
 
     conversation_id = str(uuid.uuid4())
     correlation_id = str(uuid.uuid4())
     personalization_id = str(uuid.uuid4())
     availability_id = str(uuid.uuid4())
 
-    # These are anonymous convenience cookies used by Disney's page.
-    # They contain no login/session credentials.
     session.cookies.set(
         "currentOffer_jar",
         '{"currentOffer":"room-only"}',
@@ -240,7 +242,6 @@ except requests.RequestException as exc:
         "marketingOfferId": "room-only",
         "availabilityId": availability_id,
 
-        # Matches the search captured from Disney's site.
         "affiliations": [
             "STD_GST",
             "FL_RESIDENT",
