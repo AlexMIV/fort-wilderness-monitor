@@ -1,0 +1,14 @@
+{
+  "check_in": "2026-12-30",
+  "check_out": "2027-01-01",
+  "adults": 2,
+  "children": 0,
+  "child_ages": [],
+  "accessible": false,
+  "resort_name_contains": "Campsites at Disney's Fort Wilderness Resort",
+  "campsite_types": [
+    "Premium Campsite",
+    "Premium Meadow Campsite",
+    "Full Hook-Up Campsite"
+  ]
+}
