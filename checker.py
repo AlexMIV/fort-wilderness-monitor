@@ -308,7 +308,7 @@ def check_target_rooms(data):
         if room_id == "412224545":
             is_available = True
         else:
-    is_available = not reason
+        is_available = not reason
 
 
 # ---------------------------------------------------------
