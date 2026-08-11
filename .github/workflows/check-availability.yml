@@ -1,0 +1,87 @@
+name: Fort Wilderness Availability Monitor
+
+on:
+  schedule:
+    - cron: "2-57/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send a test email instead of checking Disney"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fort-wilderness-availability-monitor
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test email
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_email }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python test_email.py
+
+      - name: Check Disney availability
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_email) }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python checker.py
+
+      - name: Maintain monthly heartbeat
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_email) }}
+        run: |
+          CURRENT_MONTH="$(date -u +%Y-%m)"
+          PREVIOUS_MONTH="$(cat state/heartbeat.txt 2>/dev/null || true)"
+          if [ "$CURRENT_MONTH" != "$PREVIOUS_MONTH" ]; then
+            printf '%s\n' "$CURRENT_MONTH" > state/heartbeat.txt
+            echo "Monthly repository heartbeat updated."
+          fi
+
+      - name: Persist monitor state
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_email) }}
+        run: |
+          if git diff --quiet -- state/availability.json state/heartbeat.txt; then
+            echo "No persistent monitor-state change."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/availability.json state/heartbeat.txt
+          git commit -m "Update Fort Wilderness monitor state"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
