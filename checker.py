@@ -308,19 +308,7 @@ def check_target_rooms(data):
         if room_id == "412224545":
             is_available = True
         else:
-            is_available = not reason
-
-        statuses[room_id] = {
-            "name": room_name,
-            "available": is_available,
-            "reason": reason,
-            "data": room,
-        }
-
-        if is_available:
-            available[room_id] = room_name
-
-    return available, statuses
+    is_available = not reason
 
 
 # ---------------------------------------------------------
