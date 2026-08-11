@@ -145,11 +145,14 @@ def get_disney_availability():
     # fresh anonymous session cookies.
     print("Opening Fort Wilderness page to establish Disney session...")
 
+try:
     page = session.get(
         BOOKING_PAGE,
         timeout=30,
     )
-    page.raise_for_status()
+    print(f"Disney page warm-up returned HTTP {page.status_code}. Continuing...")
+except requests.RequestException as exc:
+    print(f"Disney page warm-up failed: {exc}. Continuing anyway...")
 
     conversation_id = str(uuid.uuid4())
     correlation_id = str(uuid.uuid4())
