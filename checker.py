@@ -303,15 +303,12 @@ def check_target_rooms(data):
 
         reason = room.get("reasonUnavailable")
 
-        # Disney currently returns reasonUnavailable when the
-        # room cannot be booked.
-        #
-        # If reasonUnavailable is absent, the room contains
-        # pricing/offer information and is considered available.
-if room_id == "412224545":
-    is_available = True
-else:
-    is_available = not reason
+        # TEMPORARY CONTROLLED TEST:
+        # Force Premium Campsite to appear available.
+        if room_id == "412224545":
+            is_available = True
+        else:
+            is_available = not reason
 
         statuses[room_id] = {
             "name": room_name,
