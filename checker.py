@@ -292,7 +292,6 @@ def check_target_rooms(data):
     statuses = {}
 
     for room_id, room_name in TARGET_ROOMS.items():
-
         room = lookup.get(room_id)
 
         if room is None:
@@ -303,14 +302,19 @@ def check_target_rooms(data):
 
         reason = room.get("reasonUnavailable")
 
-        # TEMPORARY CONTROLLED TEST:
-        # Force Premium Campsite to appear available.
-        if room_id == "412224545":
-            is_available = True
-        else:
         is_available = not reason
 
+        statuses[room_id] = {
+            "name": room_name,
+            "available": is_available,
+            "reason": reason,
+            "data": room,
+        }
 
+        if is_available:
+            available[room_id] = room_name
+
+    return available, statuses
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
