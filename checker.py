@@ -1,258 +1,65 @@
 #!/usr/bin/env python3
-"""
-Fort Wilderness campsite availability monitor.
-
-This uses the same internal JSON endpoints used by disneyworld.disney.go.com.
-They are not a public/supported Disney API and can change without notice.
-"""
-from __future__ import annotations
 
 import json
 import os
-import re
 import smtplib
 import ssl
 import sys
-from dataclasses import dataclass
+import uuid
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Iterable
 
 import requests
 
-BASE_URL = "https://disneyworld.disney.go.com"
-RESORTS_URL = f"{BASE_URL}/wdpr-resorts-list-api/api/v1/resorts"
-AVAILABILITY_URL = f"{BASE_URL}/wdpr-resorts-list-api/api/v1/resort-availability"
-BOOKING_URL = (
+
+# ---------------------------------------------------------
+# YOUR SEARCH
+# ---------------------------------------------------------
+
+CHECK_IN = "2026-12-30"
+CHECK_OUT = "2027-01-01"
+ADULTS = 2
+CHILDREN = 0
+
+RESORT_SLUG = "campsites-at-fort-wilderness-resort"
+
+BOOKING_PAGE = (
     "https://disneyworld.disney.go.com/resorts/"
     "campsites-at-fort-wilderness-resort/rates-rooms/"
 )
 
-CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "config.json"))
-STATE_PATH = Path(os.getenv("STATE_PATH", "state/availability.json"))
+AVAILABILITY_URL = (
+    "https://disneyworld.disney.go.com/"
+    "wdw-resorts-details-api/api/v1/resort/"
+    "campsites-at-fort-wilderness-resort/"
+    "availability-and-prices/?storeId=wdw"
+)
 
-HEADERS = {
-    "accept": "application/json",
-    "content-type": "application/json",
-    "cache-control": "no-cache",
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/150.0.0.0 Safari/537.36"
-    ),
+STATE_PATH = Path("state/availability.json")
+
+
+# ---------------------------------------------------------
+# EXACT DISNEY ROOM IDs
+# ---------------------------------------------------------
+
+TARGET_ROOMS = {
+    "412223951": "Full Hook-Up Campsite",
+    "412224545": "Premium Campsite",
+    "412224546": "Premium Meadow Campsite",
 }
 
 
-@dataclass(frozen=True)
-class Match:
-    target: str
-    matched_name: str
-    details: str
+# ---------------------------------------------------------
+# EMAIL
+# ---------------------------------------------------------
 
-    @property
-    def key(self) -> str:
-        return normalize(self.target)
-
-
-def normalize(value: Any) -> str:
-    text = str(value or "").lower()
-    text = text.replace("–", "-").replace("—", "-").replace("‑", "-")
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
-
-
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def save_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def get_config() -> dict[str, Any]:
-    cfg = load_json(CONFIG_PATH, None)
-    if not cfg:
-        raise RuntimeError(f"Missing or empty configuration: {CONFIG_PATH}")
-    return cfg
-
-
-def http_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
-
-
-def get_resorts(session: requests.Session) -> dict[str, Any]:
-    r = session.get(
-        RESORTS_URL,
-        params={"storeId": "wdw", "resortGroup": "CORE", "region": "us"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, dict) or "resorts" not in data:
-        raise RuntimeError("Disney resorts response did not contain expected 'resorts' data.")
-    return data
-
-
-def get_availability(session: requests.Session, cfg: dict[str, Any]) -> dict[str, Any]:
-    body = {
-        "storeId": "wdw",
-        "checkInDate": cfg["check_in"],
-        "checkOutDate": cfg["check_out"],
-        "partyMix": {
-            "adultCount": int(cfg["adults"]),
-            "childCount": int(cfg.get("children", 0)),
-            "nonAdultAges": cfg.get("child_ages", []),
-        },
-        "accessible": bool(cfg.get("accessible", False)),
-        "region": "us",
-        "resortGroup": "CORE",
-        "affiliations": ["STD_GST"],
-    }
-    r = session.post(AVAILABILITY_URL, json=body, timeout=45)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, dict) or "resorts" not in data:
-        raise RuntimeError(
-            "Disney availability response did not contain expected 'resorts' data. "
-            "The internal endpoint may have changed."
-        )
-    return data
-
-
-def find_fort_wilderness_id(resorts: dict[str, Any], cfg: dict[str, Any]) -> str:
-    needle = normalize(cfg["resort_name_contains"])
-    for resort_id, resort in resorts.get("resorts", {}).items():
-        name = normalize((resort or {}).get("name", ""))
-        if needle in name:
-            return str(resort_id)
-    available_names = [
-        (r or {}).get("name", "") for r in resorts.get("resorts", {}).values()
-        if isinstance(r, dict)
-    ]
-    raise RuntimeError(
-        "Could not identify Fort Wilderness in Disney's resort list. "
-        f"Looked for: {cfg['resort_name_contains']!r}. "
-        f"Resorts returned: {available_names[:10]}"
-    )
-
-
-def compact(obj: Any, limit: int = 750) -> str:
-    try:
-        text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-    except Exception:
-        text = str(obj)
-    return text[:limit] + ("…" if len(text) > limit else "")
-
-
-def walk(obj: Any, path: tuple[str, ...] = ()) -> Iterable[tuple[tuple[str, ...], Any]]:
-    yield path, obj
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from walk(v, path + (str(k),))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield from walk(v, path + (str(i),))
-
-
-def object_text(obj: Any) -> str:
-    if isinstance(obj, dict):
-        vals = []
-        for key, value in obj.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                vals.append(f"{key}={value}")
-        return " | ".join(vals)
-    return str(obj)
-
-
-def target_aliases(target: str) -> set[str]:
-    n = normalize(target)
-    aliases = {n}
-    aliases.add(n.replace("campsite", "campsites"))
-    aliases.add(n.replace("campsites", "campsite"))
-    # Disney sometimes varies "Full Hook-Up" punctuation.
-    aliases.add(n.replace("full hook up", "full hookup"))
-    aliases.add(n.replace("full hookup", "full hook up"))
-    return {a for a in aliases if a}
-
-
-def contains_alias(text: str, target: str) -> bool:
-    ntext = normalize(text)
-    return any(alias in ntext for alias in target_aliases(target))
-
-
-def has_offer_context(path: tuple[str, ...], obj: Any) -> bool:
-    """
-    Avoid matching static room metadata. A room name is considered bookable only
-    when it appears in/near offer, rate, price, availability, package, product,
-    inventory, or booking data returned for the requested dates.
-    """
-    context_words = {
-        "offer", "offers", "rate", "rates", "price", "prices", "availability",
-        "available", "package", "packages", "product", "products", "inventory",
-        "booking", "bookable", "room", "rooms", "accommodation", "accommodations",
-    }
-    path_words = {normalize(p) for p in path}
-    if any(any(c in p for c in context_words) for p in path_words):
-        return True
-
-    if isinstance(obj, dict):
-        keys = {normalize(k) for k in obj.keys()}
-        return any(any(c in k for c in context_words) for k in keys)
-    return False
-
-
-def find_target_matches(resort_availability: Any, targets: list[str]) -> list[Match]:
-    """
-    Find requested campsite types inside the Fort Wilderness availability payload.
-
-    The endpoint is unofficial and its schema has changed before, so this searches
-    the Fort Wilderness subtree rather than depending on one brittle JSON path.
-    """
-    found: dict[str, Match] = {}
-
-    # Pass 1: dictionaries are best because they preserve the room name together
-    # with rate/price/offer fields.
-    for path, obj in walk(resort_availability):
-        if not isinstance(obj, dict):
-            continue
-        blob = compact(obj, 5000)
-        for target in targets:
-            if contains_alias(blob, target) and has_offer_context(path, obj):
-                found.setdefault(
-                    normalize(target),
-                    Match(
-                        target=target,
-                        matched_name=target,
-                        details=object_text(obj)[:1000] or compact(obj, 1000),
-                    ),
-                )
-
-    # Pass 2: if Disney puts a room name directly under an offers/rates branch.
-    for path, obj in walk(resort_availability):
-        if not isinstance(obj, str) or not has_offer_context(path, obj):
-            continue
-        for target in targets:
-            if contains_alias(obj, target):
-                found.setdefault(
-                    normalize(target),
-                    Match(target=target, matched_name=obj, details=" / ".join(path)),
-                )
-
-    return list(found.values())
-
-
-def send_email(subject: str, body: str) -> None:
+def send_email(subject, body):
     host = os.environ["SMTP_HOST"]
-    port = int(os.getenv("SMTP_PORT", "465"))
+    port = int(os.environ.get("SMTP_PORT", "465"))
     username = os.environ["SMTP_USERNAME"]
     password = os.environ["SMTP_PASSWORD"]
-    email_from = os.getenv("ALERT_FROM", username)
+    email_from = os.environ.get("ALERT_FROM", username)
     email_to = os.environ["ALERT_TO"]
 
     msg = EmailMessage()
@@ -262,7 +69,12 @@ def send_email(subject: str, body: str) -> None:
     msg.set_content(body)
 
     if port == 465:
-        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=30) as smtp:
+        with smtplib.SMTP_SSL(
+            host,
+            port,
+            context=ssl.create_default_context(),
+            timeout=30,
+        ) as smtp:
             smtp.login(username, password)
             smtp.send_message(msg)
     else:
@@ -272,106 +84,342 @@ def send_email(subject: str, body: str) -> None:
             smtp.send_message(msg)
 
 
-def require_email_config() -> None:
-    missing = [
-        name for name in ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "ALERT_TO")
-        if not os.getenv(name)
-    ]
-    if missing:
-        raise RuntimeError(
-            "Missing email configuration: " + ", ".join(missing) +
-            ". Add these as GitHub Actions repository secrets."
-        )
+# ---------------------------------------------------------
+# STATE / DUPLICATE ALERT PROTECTION
+# ---------------------------------------------------------
+
+def load_state():
+    if not STATE_PATH.exists():
+        return {"available": []}
+
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": []}
 
 
-def main() -> int:
-    cfg = get_config()
-    targets = list(cfg["campsite_types"])
-    print(
-        f"Checking Fort Wilderness {cfg['check_in']} -> {cfg['check_out']} "
-        f"for {cfg['adults']} adult(s): {', '.join(targets)}"
+def save_state(available_ids):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "available": sorted(available_ids),
+        "last_changed_utc": datetime.now(timezone.utc).isoformat(),
+        "search": {
+            "check_in": CHECK_IN,
+            "check_out": CHECK_OUT,
+            "adults": ADULTS,
+            "children": CHILDREN,
+        },
+    }
+
+    STATE_PATH.write_text(
+        json.dumps(state, indent=2) + "\n",
+        encoding="utf-8",
     )
 
-    session = http_session()
-    resorts = get_resorts(session)
-    resort_id = find_fort_wilderness_id(resorts, cfg)
-    availability = get_availability(session, cfg)
 
-    resort_tree = availability.get("resorts", {}).get(resort_id)
-    if resort_tree is None:
-        # Some versions may key availability differently; do a conservative
-        # fallback search for the resort ID/string in the resorts map.
-        for rid, candidate in availability.get("resorts", {}).items():
-            if str(rid) == str(resort_id):
-                resort_tree = candidate
-                break
+# ---------------------------------------------------------
+# DISNEY REQUEST
+# ---------------------------------------------------------
 
-    if resort_tree is None:
-        print("Fort Wilderness has no availability entry for these dates.")
-        current_keys: set[str] = set()
-        matches: list[Match] = []
-    else:
-        matches = find_target_matches(resort_tree, targets)
-        current_keys = {m.key for m in matches}
+def disney_session():
+    session = requests.Session()
 
-    old_state = load_json(STATE_PATH, {"available": []})
-    previous_keys = set(old_state.get("available", []))
+    session.headers.update({
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "en-us",
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+    })
 
-    newly_available = current_keys - previous_keys
-    newly_unavailable = previous_keys - current_keys
+    return session
 
-    print("Currently matched:", sorted(current_keys) if current_keys else "none")
+
+def get_disney_availability():
+    session = disney_session()
+
+    # First visit Disney normally so Disney can establish
+    # fresh anonymous session cookies.
+    print("Opening Fort Wilderness page to establish Disney session...")
+
+    page = session.get(
+        BOOKING_PAGE,
+        timeout=30,
+    )
+    page.raise_for_status()
+
+    conversation_id = str(uuid.uuid4())
+    correlation_id = str(uuid.uuid4())
+    personalization_id = str(uuid.uuid4())
+    availability_id = str(uuid.uuid4())
+
+    # These are anonymous convenience cookies used by Disney's page.
+    # They contain no login/session credentials.
+    session.cookies.set(
+        "currentOffer_jar",
+        '{"currentOffer":"room-only"}',
+        domain="disneyworld.disney.go.com",
+    )
+
+    session.cookies.set(
+        "personalization_jar",
+        json.dumps({"id": personalization_id}),
+        domain="disneyworld.disney.go.com",
+    )
+
+    session.cookies.set(
+        "roomForm_jar",
+        json.dumps({
+            "accessible": "0",
+            "checkInDate": CHECK_IN,
+            "checkOutDate": CHECK_OUT,
+            "numberOfAdults": str(ADULTS),
+            "numberOfChildren": str(CHILDREN),
+            "resort": RESORT_SLUG,
+        }),
+        domain="disneyworld.disney.go.com",
+    )
+
+    headers = {
+        "content-type": "application/json",
+        "origin": "https://disneyworld.disney.go.com",
+        "referer": BOOKING_PAGE,
+
+        "deltapackages": "true",
+
+        "x-conversation-id": conversation_id,
+        "x-correlation-id": correlation_id,
+
+        "x-disney-internal-core-api-mods-checkout": "true",
+        "x-disney-internal-core-api-quote-checkout": "true",
+        "x-disney-internal-core-api-quote-checkout-mods": "true",
+        "x-disney-internal-core-api-quote-checkout-ta": "true",
+        "x-disney-internal-core-api-quote-checkout-ta-mods": "true",
+        "x-disney-internal-core-api-reservation-va": "true",
+        "x-disney-internal-core-api-reservation-va-ta": "true",
+        "x-disney-internal-core-api-resort-package": "true",
+        "x-disney-internal-default-ticket-availability": "true",
+        "x-disney-internal-dynamic-price-override-enabled": "true",
+        "x-disney-internal-useroneidtoken": "true",
+
+        "x-enable-peach-lodging": "true",
+        "x-enable-uplift": "true",
+    }
+
+    party_mix = {
+        "adultCount": ADULTS,
+        "childCount": CHILDREN,
+        "nonAdultAges": [],
+    }
+
+    payload = {
+        "checkInDate": CHECK_IN,
+        "checkOutDate": CHECK_OUT,
+
+        "partyMix": party_mix,
+
+        "region": "US",
+        "accessible": False,
+
+        "ccrm": {
+            "marketingOfferId": "room-only",
+            "checkInDate": CHECK_IN,
+            "checkOutDate": CHECK_OUT,
+            "partyMix": party_mix,
+            "preferredResort": RESORT_SLUG,
+        },
+
+        "personalizationId": personalization_id,
+        "sendOffersCarousel": True,
+        "marketingOfferId": "room-only",
+        "availabilityId": availability_id,
+
+        # Matches the search captured from Disney's site.
+        "affiliations": [
+            "STD_GST",
+            "FL_RESIDENT",
+        ],
+
+        "postalCode": "34230",
+    }
+
+    print("Requesting current Disney availability...")
+
+    response = session.post(
+        AVAILABILITY_URL,
+        headers=headers,
+        json=payload,
+        timeout=45,
+    )
+
+    if response.status_code != 200:
+        print(
+            f"Disney response: HTTP {response.status_code}",
+            file=sys.stderr,
+        )
+
+        print(
+            response.text[:1500],
+            file=sys.stderr,
+        )
+
+        response.raise_for_status()
+
+    return response.json()
+
+
+# ---------------------------------------------------------
+# INTERPRET RESPONSE
+# ---------------------------------------------------------
+
+def check_target_rooms(data):
+    lookup = data.get("roomPriceLookup")
+
+    if not isinstance(lookup, dict):
+        raise RuntimeError(
+            "Disney response does not contain roomPriceLookup. "
+            "Disney may have changed its API."
+        )
+
+    available = {}
+    statuses = {}
+
+    for room_id, room_name in TARGET_ROOMS.items():
+
+        room = lookup.get(room_id)
+
+        if room is None:
+            raise RuntimeError(
+                f"Disney response did not contain expected room ID "
+                f"{room_id} ({room_name})."
+            )
+
+        reason = room.get("reasonUnavailable")
+
+        # Disney currently returns reasonUnavailable when the
+        # room cannot be booked.
+        #
+        # If reasonUnavailable is absent, the room contains
+        # pricing/offer information and is considered available.
+        is_available = not reason
+
+        statuses[room_id] = {
+            "name": room_name,
+            "available": is_available,
+            "reason": reason,
+            "data": room,
+        }
+
+        if is_available:
+            available[room_id] = room_name
+
+    return available, statuses
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+
+def main():
+    print()
+    print("FORT WILDERNESS AVAILABILITY CHECK")
+    print("----------------------------------")
+    print(f"Check-in:  {CHECK_IN}")
+    print(f"Check-out: {CHECK_OUT}")
+    print(f"Guests:    {ADULTS} adults")
+    print()
+
+    data = get_disney_availability()
+
+    available, statuses = check_target_rooms(data)
+
+    print()
+    print("Disney results:")
+    print()
+
+    for room_id, info in statuses.items():
+        if info["available"]:
+            print(
+                f"AVAILABLE: {info['name']} "
+                f"({room_id})"
+            )
+        else:
+            print(
+                f"Unavailable: {info['name']} "
+                f"({room_id}) — {info['reason']}"
+            )
+
+    previous_state = load_state()
+    previous_available = set(previous_state.get("available", []))
+    current_available = set(available.keys())
+
+    newly_available = current_available - previous_available
+    disappeared = previous_available - current_available
+
+    print()
+    print(
+        "Currently available target IDs:",
+        sorted(current_available) if current_available else "none",
+    )
+
     if newly_available:
-        print("Newly available:", sorted(newly_available))
-    if newly_unavailable:
-        print("No longer available:", sorted(newly_unavailable))
+        print()
+        print("NEW AVAILABILITY DETECTED!")
 
-    # Only email when something transitions from unavailable -> available.
-    if newly_available:
-        require_email_config()
-        new_matches = [m for m in matches if m.key in newly_available]
         lines = [
-            "FORT WILDERNESS CAMPSITE AVAILABILITY FOUND",
+            "FORT WILDERNESS CAMPSITE AVAILABLE",
             "",
-            f"Check-in: {cfg['check_in']}",
-            f"Check-out: {cfg['check_out']}",
-            f"Guests: {cfg['adults']} adults",
+            f"Check-in: December 30, 2026",
+            f"Check-out: January 1, 2027",
+            f"Guests: 2 adults",
             "",
-            "Newly available campsite type(s):",
+            "Newly available:",
         ]
-        for m in new_matches:
-            lines.append(f"- {m.target}")
-        lines += [
+
+        for room_id in sorted(newly_available):
+            lines.append(
+                f"- {TARGET_ROOMS[room_id]}"
+            )
+
+        lines.extend([
             "",
-            "Book/check immediately:",
-            BOOKING_URL,
+            "Disney availability can disappear quickly.",
             "",
-            "Availability can disappear quickly. Re-run the same dates and guest count on Disney's site.",
-        ]
+            "Check/book here:",
+            BOOKING_PAGE,
+        ])
+
         send_email(
             "🚨 Fort Wilderness campsite available — Dec 30 to Jan 1",
             "\n".join(lines),
         )
+
         print("Alert email sent.")
 
-    new_state = {
-        "available": sorted(current_keys),
-        "last_changed_utc": datetime.now(timezone.utc).isoformat(),
-        "search": {
-            "check_in": cfg["check_in"],
-            "check_out": cfg["check_out"],
-            "adults": cfg["adults"],
-            "campsite_types": targets,
-        },
-    }
+    if disappeared:
+        print()
+        print("Previously available inventory is no longer available:")
 
-    # Preserve last_changed_utc when state has not changed so GitHub doesn't
-    # create a commit every 5 minutes.
-    if current_keys == previous_keys and STATE_PATH.exists():
-        print("No availability-state change. State file left untouched.")
+        for room_id in disappeared:
+            print(
+                f"- {TARGET_ROOMS.get(room_id, room_id)}"
+            )
+
+    # Only rewrite the state file when availability actually changes.
+    # This prevents GitHub from committing a file every 5 minutes.
+    if current_available != previous_available:
+        save_state(current_available)
+        print()
+        print("Availability state updated.")
     else:
-        save_json(STATE_PATH, new_state)
-        print(f"State updated: {STATE_PATH}")
+        print()
+        print("No availability-state change.")
+
+    print()
+    print("Check completed successfully.")
 
     return 0
 
@@ -379,9 +427,17 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+
     except requests.RequestException as exc:
-        print(f"DISNEY HTTP ERROR: {exc}", file=sys.stderr)
+        print(
+            f"DISNEY HTTP ERROR: {exc}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
+
     except Exception as exc:
-        print(f"MONITOR ERROR: {exc}", file=sys.stderr)
+        print(
+            f"MONITOR ERROR: {exc}",
+            file=sys.stderr,
+        )
         raise SystemExit(3)
